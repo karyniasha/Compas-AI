@@ -112,22 +112,24 @@ def save_answer(scenario_code: str, answers: dict, key: str, value: str | list[s
         raise ValueError("Неизвестное поле анкеты")
     if key in answers:
         raise ValueError("Поле уже заполнено; используйте сброс для нового прохождения")
+    expected = get_question(scenario_code, answers)
+    if expected is None or expected.key != key:
+        raise ValueError("Этапы сценария необходимо проходить по порядку")
     if question.kind == "choice" and value not in question.options:
         raise ValueError("Ответ должен быть выбран из вариантов")
-    if question.kind == "multi" and (not isinstance(value, list) or not 1 <= len(value) <= 3 or any(v not in question.options for v in value)):
+    if question.kind == "multi" and (not isinstance(value, list) or not 1 <= len(value) <= 3 or any(v not in question.options for v in value) or len(set(value)) != len(value)):
         raise ValueError("Выберите от одного до трёх вариантов")
-    if question.kind == "text" and (not isinstance(value, str) or not value.strip()):
+    if question.kind == "text" and (not isinstance(value, str) or not value.strip() or len(value) > 1000):
         raise ValueError("Ответ не должен быть пустым")
     return {**answers, key: value}
 
 
 def evaluate_case(scenario_code: str, case_index: int, selected_index: int) -> tuple[bool, str]:
-    case = SCENARIOS[scenario_code].cases[case_index]
-    if not 0 <= selected_index < len(case.options):
-        raise ValueError("Неизвестный вариант ответа")
-    good = selected_index == case.correct
-    prefix = "Верно. " if good else "Пока нет. "
-    return good, prefix + case.feedback + " Принцип: " + case.principle
+    """Backward-compatible adapter; detailed assessment lives in examiner.py."""
+    from .examiner import assess_case
+
+    outcome = assess_case(scenario_code, case_index, selected_index)
+    return outcome.correct, outcome.message
 
 
 def report_markdown(scenario_code: str, answers: dict, attempts: dict[int, bool] | None = None) -> str:
@@ -152,10 +154,27 @@ def report_markdown(scenario_code: str, answers: dict, attempts: dict[int, bool]
         lines += ["- Проверить компанию и официальное описание стажировки.", "- Сравнить оплату, график, наставничество и ожидаемые навыки."]
     else:
         lines += ["- Обсудить ожидания и критерии результата с наставником или руководителем.", "- Согласовать следующую встречу для обратной связи."]
+    if scenario_code == "history":
+        # The default report is independently verifiable, even when downloaded.
+        from datetime import date
+        from .knowledge import KnowledgeRepository, information_response
+
+        info = information_response(KnowledgeRepository.from_file(), "programs", answers.get("year"), as_of=date.today())
+        lines += ["", "## Проверенные сведения о программах", "Данные проверены по официальным страницам; не заменяют правила приёма на выбранный год."]
+        for item in info.universities:
+            if item.verified:
+                for fact in item.verified:
+                    lines.append(f"- **{item.university}:** {fact.statement} [Официальный источник]({fact.source_url}) (проверено: {fact.retrieved_at.isoformat()}; актуальность до: {fact.valid_until.isoformat()}).")
+            else:
+                lines.append(f"- **{item.university}:** сведения требуют повторной проверки.")
+        lines += ["", "## Статус правил приёма"]
+        year = answers.get("year", "Пока не определён")
+        lines.append(f"Правила поступления на выбранный год ({year}) должны быть подтверждены отдельно для каждого вуза; архивные условия 2026 года нельзя автоматически переносить на другие годы.")
     if attempts:
         lines += ["", "## Самопроверка", f"Пройдено кейсов: {len(attempts)}. Корректных ответов: {sum(attempts.values())}."]
-        wrong = [scenario.cases[i].title for i, ok in attempts.items() if not ok]
-        if wrong:
-            lines.append("Повторить: " + "; ".join(wrong))
+        from .examiner import repeat_recommendations
+        repeat = repeat_recommendations(scenario_code, attempts)
+        if repeat:
+            lines.append("Повторить (по категориям ошибок): " + "; ".join(repeat))
     lines += ["", "## Важное ограничение", "Этот отчёт — учебная карта вопросов, а не решение о поступлении или трудоустройстве. Все сведения необходимо подтверждать официальными источниками соответствующего года."]
     return "\n".join(lines)
