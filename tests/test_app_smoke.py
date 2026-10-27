@@ -1,5 +1,6 @@
 """Headless script smoke checks. Not a substitute for a browser/UI test."""
 from contextlib import nullcontext
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -72,6 +73,17 @@ class FakeStreamlit(types.ModuleType):
 
 
 class StreamlitSmokeTests(unittest.TestCase):
+    def test_configured_api_key_does_not_enable_external_requests(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-only-placeholder", "OPENAI_MODEL": "test-model"}), \
+                patch("kompas.llm_adapter.OpenAIResponsesModel.generate_followup") as remote, \
+                patch("socket.socket.connect", side_effect=AssertionError("Unexpected network request")) as network:
+            for scenario in SCENARIOS:
+                result = self._render(scenario, complete=True)
+                self.assertIn("Локальный режим", result)
+                self.assertIn("не отправляются в LLM", result)
+            remote.assert_not_called()
+            network.assert_not_called()
+
     def _render(self, scenario, topic="programs", complete=False):
         stub = FakeStreamlit(scenario, topic, complete)
         with patch.dict(sys.modules, {"streamlit": stub}):

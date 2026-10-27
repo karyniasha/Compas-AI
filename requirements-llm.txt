@@ -1,0 +1,2 @@
+# Optional: only for explicit use of kompas.llm_adapter.
+openai>=2,<3

@@ -1,4 +1,4 @@
-"""Provider-neutral LLM boundary. Version 0.2 deliberately has no external API."""
+"""Provider-neutral LLM boundary and an entirely offline implementation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
