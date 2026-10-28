@@ -1,8 +1,11 @@
-"""Kompas MVP 0.1. Start with: streamlit run app.py"""
+"""Kompas MVP 0.2.1. Start with: streamlit run app.py"""
 from __future__ import annotations
 
 import streamlit as st
-from kompas.core import SCENARIOS, get_question, save_answer, evaluate_case, report_markdown
+from kompas.core import SCENARIOS, get_question, save_answer, report_markdown
+from kompas.examiner import assess_case, repeat_recommendations
+from kompas.knowledge import KnowledgeRepository, TOPICS, information_response
+from kompas.model import RuleBasedModel
 
 st.set_page_config(page_title="Компас — AI-наставник", page_icon="🧭", layout="centered")
 st.markdown("""
@@ -18,10 +21,12 @@ if "answers" not in st.session_state:
     st.session_state.answers = {code: {} for code in SCENARIOS}
 if "attempts" not in st.session_state:
     st.session_state.attempts = {code: {} for code in SCENARIOS}
+if "exam_results" not in st.session_state:
+    st.session_state.exam_results = {code: {} for code in SCENARIOS}
 
 with st.sidebar:
     st.title("🧭 Компас")
-    st.caption("MVP 0.1 · Демо без API-ключа")
+    st.caption("MVP 0.2.1 · Локальный режим без LLM")
     selected = st.selectbox(
         "Жизненный сценарий",
         options=list(SCENARIOS),
@@ -32,13 +37,15 @@ with st.sidebar:
     if st.button("Начать сценарий заново", use_container_width=True):
         st.session_state.answers[selected] = {}
         st.session_state.attempts[selected] = {}
+        st.session_state.exam_results[selected] = {}
         st.rerun()
     st.divider()
-    st.info("Тестовый режим: фиксированные вопросы и проверяемые правила. Реальная языковая модель пока не подключена.")
+    st.info("Локальный режим: фиксированные вопросы и проверяемые правила. Ответы из этого интерфейса не отправляются в LLM, даже если API-ключ настроен.")
 
 scenario = SCENARIOS[st.session_state.active_scenario]
 answers = st.session_state.answers[scenario.code]
 attempts = st.session_state.attempts[scenario.code]
+exam_results = st.session_state.exam_results[scenario.code]
 
 st.title("🧭 Компас")
 st.subheader(scenario.title)
@@ -98,42 +105,67 @@ with trainer_tab:
                 user_choice = st.radio("Какой подход выберешь?", range(len(case.options)), format_func=lambda idx: case.options[idx], key=f"case_radio_{scenario.code}_{i}")
                 check = st.form_submit_button("Проверить ответ")
             if check:
-                is_correct, feedback = evaluate_case(scenario.code, i, user_choice)
-                st.session_state.attempts[scenario.code][i] = is_correct
-                if is_correct:
-                    st.success(feedback)
+                result = assess_case(scenario.code, i, user_choice)
+                st.session_state.attempts[scenario.code][i] = result.correct
+                st.session_state.exam_results[scenario.code][i] = user_choice
+            # Feedback survives a widget rerun within the current Streamlit session.
+            if i in exam_results:
+                result = assess_case(scenario.code, i, exam_results[i])
+                if result.correct:
+                    st.success(result.message)
                 else:
-                    st.warning(feedback)
-            if i in attempts:
-                st.caption("Последняя попытка: " + ("верно" if attempts[i] else "нужно повторить"))
+                    st.warning(result.message)
+                    st.caption("Категория ошибки: " + result.error_category)
+                st.caption("Последняя попытка: " + ("верно" if result.correct else "нужно повторить"))
     st.divider()
     st.metric("Пройдено кейсов", f"{len(attempts)}/{len(scenario.cases)}")
-    needs_repeat = [scenario.cases[i].title for i, good in attempts.items() if not good]
+    needs_repeat = repeat_recommendations(scenario.code, attempts)
     if needs_repeat:
         st.warning("Рекомендуется повторить: " + "; ".join(needs_repeat))
 
 with sources_tab:
-    st.markdown("### База знаний: демонстрационные источники")
+    st.markdown("### Контролируемый информационный режим")
     if scenario.code == "history":
-        st.markdown("""
-| Университет | Что подтверждено | Источник | Статус на 2027 |
-|---|---|---|---|
-| СГУ | Есть направление 46.03.01 «История», очная форма | [СГУ — институт](https://sgu.ru/struktura/imimo) | Требует обновления правил |
-| СПбГУ | В материалах приёма 2026 указаны программы по истории | [СПбГУ — списки 2026](https://cabinet.spbu.ru/Lists/ForeignersLists/bak/list_8c1eaa86-c0d3-47e0-83d8-736e6d3f1e86.html) | Требует обновления правил |
-| МГУ | Выбран Георгием для сравнения | Ещё не заполнено | Требуется проверка |
-| РГГУ | Выбран Георгием для сравнения | Ещё не заполнено | Требуется проверка |
-""")
-        st.warning("В MVP нет актуальных проходных баллов, стоимости общежитий, мест и расчёта вероятности зачисления. Программа не должна их придумывать.")
+        st.caption("Сведения берутся из локального реестра с официальными URL, датами и годом набора. Сайты не опрашиваются автоматически.")
+        selected_topic = st.selectbox("Что изучить?", list(TOPICS), format_func=lambda code: TOPICS[code])
+        year = answers.get("year")
+        st.caption(f"Год поступления из анкеты: {year or 'пока не указан'}")
+        try:
+            repo = KnowledgeRepository.from_file()
+            data = information_response(repo, selected_topic, year)
+        except (OSError, ValueError) as exc:
+            st.error(f"Не удалось прочитать проверенную базу знаний: {exc}")
+        else:
+            st.info(data.notice)
+            for item in data.universities:
+                st.markdown(f"#### {item.university}")
+                if not item.verified:
+                    st.write("Подтверждённых данных для выбранного раздела и года пока нет. Требуется проверка.")
+                for fact in item.verified:
+                    st.write(fact.statement)
+                    st.caption(f"Проверено: {fact.retrieved_at}; актуальность записи до: {fact.valid_until}. Это не гарантия актуальности сайта в момент просмотра.")
+                    st.markdown(f"[Открыть официальный источник]({fact.source_url})")
+                if item.archive:
+                    with st.expander("Архивные сведения — не использовать как текущие правила"):
+                        for fact in item.archive:
+                            st.write(f"Набор {fact.intake_year or 'не указан'}: {fact.statement}")
+                            st.caption(f"Проверено: {fact.retrieved_at}; статус: устарело / не подходит к выбранному году.")
+                            if fact.source_url:
+                                st.markdown(f"[Источник архивной записи]({fact.source_url})")
+            st.divider()
+            st.markdown("**Вопрос для дальнейшего исследования**")
+            st.write(RuleBasedModel().generate_followup({"topic": selected_topic}, ()).text)
+            st.caption("Вопрос сформулирован локальными правилами, а не языковой моделью.")
     else:
-        st.info("Для этого сценария источники предстоит подобрать и документировать. Сейчас работает только структура обсуждения и самопроверка.")
+        st.info("Для сценария пока нет проверенных записей в базе знаний. Сам сценарий и тренажёр доступны; факты не подставляются автоматически.")
 
 with tech_tab:
     st.markdown("""
-### Границы версии 0.1
+### Границы версии 0.2.1
 
-- **Работает:** выбор из трёх жизненных сценариев; пошаговый маршрут; обработка неизвестного бюджета; пять кейсов Георгия; самопроверка; временная память ошибок; экспорт Markdown.
-- **Пока не работает:** свободный диалог с LLM, семантическая проверка произвольных ответов, автоматическое обновление сайтов вузов, постоянная база профилей, экспорт PDF, достоверный прогноз поступления.
-- **Как подключим LLM:** заменим генератор вопросов и анализатор свободных ответов на отдельный API-адаптер. Контроль этапов диалога, исходных фактов и подтверждения источников останется в Python.
+- **Работает:** выбор из трёх жизненных сценариев; пошаговый маршрут; обработка неизвестного бюджета; пять кейсов Георгия; самопроверка с объяснением вариантов и категориями ошибок; временная память результатов; экспорт Markdown; локальная база проверенных ссылок; информационный режим с отделением архивных данных; интерфейс локального адаптера.
+- **Пока не работает:** свободный диалог с LLM, семантическая проверка произвольных ответов, автоматическое обновление сайтов вузов, постоянная база профилей, адаптация между запусками, экспорт PDF, достоверный прогноз поступления.
+- **Адаптер LLM:** реализован отдельно через OpenAI Responses API с возвратом к локальным правилам при сбое. Подключение диалога к интерфейсу и согласие на передачу данных — следующая задача K-033. Сейчас интерфейс работает локально.
 
 Проект не собирает настоящие персональные данные и по умолчанию ничего не записывает на диск. Ответы хранятся в сеансе Streamlit, пока он существует.
 """)
